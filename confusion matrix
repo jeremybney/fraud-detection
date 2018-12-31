@@ -1,0 +1,124 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Dec 28 18:16:48 2018
+
+@author: JeremyNey
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, precision_recall_curve
+from imblearn.over_sampling import SMOTE
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import confusion_matrix
+
+
+data = pd.read_csv('/Users/JeremyNey/Downloads/creditcard.csv')
+
+count = pd.value_counts(data['Class'], sort = True).sort_index()
+count.plot(kind = 'bar')
+count
+
+#split the dataset, we will do this again later
+y = data['Class']
+X = data.drop('Class',axis=1)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, stratify=y,random_state=8125)
+X_train, X_validate, y_train, y_validate = train_test_split(X_train, y_train, test_size=0.333, stratify=y_train,random_state=8125)
+train = pd.concat([X_train, y_train],axis=1)
+validation = pd.concat([X_validate, y_validate],axis=1)
+test = pd.concat([X_test, y_test],axis=1)
+print("Percentage of fraud transactions in train is: ",round(train.Class.mean(),4))
+print("Percentage of fraud transactions in test is: ",round(test.Class.mean(),4))
+
+
+sns.boxplot(x="Class", y="Time",data=train)
+train.groupby("Class").Time.describe()
+
+data = pd.concat([train,validation,test],axis=0)
+#the column names are auto reordered, lets turn it back to what it should be
+data = data[list(train.columns.values)]
+data.sort_index(inplace=True)
+#create the time difference feature
+data['Time_Difference'] = data['Time']-data['Time'].shift()
+#remove the nan row caused by lag
+data.dropna(axis=0,inplace=True)
+
+#split the data set again
+y = data['Class']
+X = data.drop('Class',axis=1)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, stratify=y,random_state=8125)
+X_train, X_validate, y_train, y_validate = train_test_split(X_train, y_train, test_size=0.333, stratify=y_train,random_state=8125)
+train = pd.concat([X_train, y_train],axis=1)
+
+train.groupby('Class').Time_Difference.describe()
+
+pd.options.mode.chained_assignment = None
+def amount_threshold(x):
+    if x > 2000: return 1
+    else: return 0
+    
+X_train['Large_Amount'] = X_train['Amount'].apply(amount_threshold)
+X_validate['Large_Amount'] = X_validate['Amount'].apply(amount_threshold)
+X_test['Large_Amount'] = X_test['Amount'].apply(amount_threshold)
+
+logCV = LogisticRegressionCV(Cs=[0.01,0.1,1,10,100], scoring='average_precision',verbose=0,
+                             max_iter=200,random_state=5001)
+logCV.fit(X_train,y_train)
+print("The best parameter C is",logCV.C_[0])
+
+pred_prob = logCV.predict_proba(X_validate)
+y_score = pred_prob[:,1]
+average_precision = average_precision_score(y_validate, y_score)
+original_precision, original_recall, original_thresholds = precision_recall_curve(y_validate, y_score)
+
+sm = SMOTE(random_state=4001,kind='regular')
+X_res, y_res = sm.fit_sample(X_train, y_train)
+pd.value_counts(y_res)
+
+#C=10 was derived from hyperparameters above
+log_res = LogisticRegression(C=10, verbose=0, random_state=5001)
+log_res.fit(X_res,y_res)
+
+#random forest clasifier
+rf = RandomForestClassifier(max_depth=4, n_estimators=100, bootstrap=True, random_state=7017)
+rf.fit(X_res,y_res)
+pred_prob = rf.predict_proba(X_validate)
+rf_score = pred_prob[:,1]
+average_precision = average_precision_score(y_validate, y_score)
+rf_precision, rf_recall, rf_thresholds = precision_recall_curve(y_validate, rf_score)
+
+error = []
+for recall, precision in zip(rf_recall, rf_precision):
+    err = (recall-0.81)**2 + (precision-0.84)**2
+    error.append(err)
+error = np.asarray(error)
+min_index = np.where(error==min(error))
+opt_threshold = rf_thresholds[min_index]
+"The optimised threshold is: {0:0.3f}".format(opt_threshold[0])
+
+#predict on training set
+y_pred = [1 if x > opt_threshold else 0 for x in rf_score]
+conf = confusion_matrix(y_validate,y_pred)
+conf = pd.DataFrame(conf, range(2),range(2))
+sns.heatmap(conf, annot=True, fmt='g', annot_kws={"size": 16})
+plt.title('Confusion matrix for validation set')
+
+
+#predict on the test set
+pred_prob = rf.predict_proba(X_test)
+pred_prob
+y_score = pred_prob[:,1]
+y_pred = [1 if x > opt_threshold else 0 for x in y_score]
+conf = confusion_matrix(y_test,y_pred)
+conf = pd.DataFrame(conf, range(2),range(2))
+sns.heatmap(conf, annot=True, fmt='g', annot_kws={"size": 16})
+plt.title('Confusion matrix for prediction on test set')
+
+#append predictions 
+test['prediction'] = y_pred
